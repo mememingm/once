@@ -1,0 +1,262 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  email        String     @unique
+  passwordHash String
+  role         String     @default("USER")
+  status       String     @default("ACTIVE")
+  lastLoginAt  DateTime?  @db.Timestamptz(3)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+  sessions     Session[]
+  leases       Lease[]
+  orders       Order[]
+  audits       AuditLog[]
+  adminIdempotencies AdminIdempotency[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([role, status])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  tokenHash String   @unique
+  userId    String   @db.Uuid
+  expiresAt DateTime @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@index([expiresAt])
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  tokenHash String   @unique
+  userId    String   @db.Uuid
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PhoneNumber {
+  id                String    @id @default(uuid()) @db.Uuid
+  number            String    @unique
+  countryCode       String
+  countryName       String
+  regionId          String
+  regionName        String
+  provider          String    @default("demo")
+  providerAccountId String    @default("")
+  providerNumberId  String?
+  providerStatus    String?
+  resourceExpiresAt DateTime? @db.Timestamptz(3)
+  lastSyncedAt      DateTime? @db.Timestamptz(3)
+  occupied          Boolean   @default(false)
+  holdReason        String?
+  smsEnabled        Boolean   @default(true)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  leases            Lease[]
+  orders            Order[]
+
+  @@unique([provider, providerAccountId, providerNumberId], map: "PhoneNumber_provider_account_number_key")
+  @@index([provider, providerAccountId, providerStatus], map: "PhoneNumber_provider_inventory_idx")
+  @@index([countryCode, regionId, occupied])
+}
+
+model Lease {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @db.Uuid
+  phoneNumberId String         @db.Uuid
+  termDays      Int
+  priceMinor    Int
+  currency      String         @default("USD")
+  startedAt     DateTime       @default(now()) @db.Timestamptz(3)
+  expiresAt     DateTime       @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  status        String         @default("ACTIVE")
+  endedAt       DateTime?      @db.Timestamptz(3)
+  user          User           @relation(fields: [userId], references: [id])
+  phoneNumber   PhoneNumber    @relation(fields: [phoneNumberId], references: [id])
+  messages      Message[]
+  webhookEvents WebhookEvent[]
+  outbound      OutboundMessage[]
+  orders        Order[]
+
+  // Partial exclusivity and non-overlapping service windows are enforced in SQL migrations.
+  @@index([phoneNumberId, startedAt, expiresAt], map: "Lease_number_window_idx")
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@index([status, expiresAt, id])
+}
+
+model Message {
+  id                String   @id @default(uuid()) @db.Uuid
+  leaseId           String   @db.Uuid
+  sender            String
+  title             String
+  body              String
+  code              String?
+  provider          String   @default("demo")
+  // Empty account is reserved for legacy/local demo records; live imports supply the PC account.
+  providerAccountId String   @default("")
+  providerMessageId String?
+  receivedAt        DateTime @default(now()) @db.Timestamptz(3)
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  readAt            DateTime? @db.Timestamptz(3)
+  lease             Lease    @relation(fields: [leaseId], references: [id])
+
+  @@unique([provider, providerAccountId, providerMessageId], map: "Message_provider_account_message_key")
+  @@index([leaseId, receivedAt(sort: Desc), id])
+  @@index([leaseId, createdAt], map: "Message_lease_ingestion_idx")
+}
+
+model OutboundMessage {
+  id                String    @id @default(uuid()) @db.Uuid
+  leaseId           String    @db.Uuid
+  from              String
+  to                String
+  content           String
+  provider          String
+  providerAccountId String    @default("")
+  providerMessageId String?
+  idempotencyKey    String
+  requestHash       String
+  status            String    @default("PENDING")
+  providerStatus    String?
+  lastError         String?
+  attempts          Int       @default(0)
+  claimToken        String?   @db.Uuid
+  claimUntil        DateTime? @db.Timestamptz(3)
+  lastCheckedAt     DateTime? @db.Timestamptz(3)
+  lastEventAt       DateTime? @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(3)
+  lease             Lease     @relation(fields: [leaseId], references: [id], onDelete: Restrict)
+  webhookEvents     WebhookEvent[]
+
+  @@unique([leaseId, idempotencyKey])
+  @@unique([provider, providerAccountId, providerMessageId], map: "OutboundMessage_provider_identity_key")
+  @@index([leaseId, createdAt(sort: Desc), id])
+  @@index([status, claimUntil, lastCheckedAt])
+}
+
+model Order {
+  id              String       @id @default(uuid()) @db.Uuid
+  userId          String       @db.Uuid
+  leaseId         String?      @db.Uuid
+  phoneNumberId   String?      @db.Uuid
+  numberSnapshot  String?
+  kind            String
+  termDays        Int
+  amountMinor     Int
+  currency        String       @default("USD")
+  status          String       @default("PENDING")
+  mockScenario    String?
+  attempts        Int          @default(0)
+  claimToken      String?      @db.Uuid
+  claimUntil      DateTime?    @db.Timestamptz(3)
+  checkedAt       DateTime?    @db.Timestamptz(3)
+  completedAt     DateTime?    @db.Timestamptz(3)
+  providerOrderId String?
+  lastError       String?
+  evidence        Json?
+  idempotencyKey  String
+  requestHash     String
+  createdAt       DateTime     @default(now()) @db.Timestamptz(3)
+  user            User         @relation(fields: [userId], references: [id])
+  lease           Lease?       @relation(fields: [leaseId], references: [id], onDelete: Restrict)
+  phoneNumber     PhoneNumber? @relation(fields: [phoneNumberId], references: [id], onDelete: Restrict)
+  payments        Payment[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt(sort: Desc), id])
+  @@index([status, claimUntil])
+  @@index([phoneNumberId])
+  @@index([leaseId])
+}
+
+model Payment {
+  id                String   @id @default(uuid()) @db.Uuid
+  orderId           String   @db.Uuid
+  provider          String
+  providerPaymentId String?
+  amountMinor       Int
+  currency          String
+  status            String
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  order             Order    @relation(fields: [orderId], references: [id])
+
+  @@unique([provider, providerPaymentId])
+  @@index([orderId])
+}
+
+model WebhookEvent {
+  id                String    @id @default(uuid()) @db.Uuid
+  provider          String
+  providerAccountId String    @default("")
+  providerNumberId  String?
+  providerMessageId String?
+  occurredAt        DateTime? @db.Timestamptz(3)
+  eventId           String
+  payload           Json
+  status            String    @default("RECEIVED")
+  attempts          Int       @default(0)
+  payloadHash       String?
+  processedAt       DateTime? @db.Timestamptz(3)
+  nextAttemptAt     DateTime? @db.Timestamptz(3)
+  lastError         String?
+  leaseId           String?   @db.Uuid
+  lease             Lease?    @relation(fields: [leaseId], references: [id], onDelete: Restrict)
+  outboundMessageId String?   @db.Uuid
+  outboundMessage   OutboundMessage? @relation(fields: [outboundMessageId], references: [id], onDelete: Restrict)
+  conflictCount     Int       @default(0)
+  lastConflictHash  String?
+  lastConflictAt    DateTime? @db.Timestamptz(3)
+  receivedAt        DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@unique([provider, providerAccountId, eventId], map: "WebhookEvent_provider_account_event_key")
+  @@index([leaseId])
+  @@index([outboundMessageId])
+  @@index([provider, providerAccountId, status, nextAttemptAt], map: "WebhookEvent_provider_retry_idx")
+  @@index([provider, providerAccountId, providerNumberId, occurredAt], map: "WebhookEvent_number_time_idx")
+  @@index([status, receivedAt])
+  @@index([status, nextAttemptAt])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  action     String
+  resourceId String
+  targetType String   @default("")
+  reason     String   @default("")
+  details    Json?
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}
+
+model AdminIdempotency {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique
+  actorId     String   @db.Uuid
+  requestHash String
+  result      Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  actor       User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([actorId, createdAt])
+}
